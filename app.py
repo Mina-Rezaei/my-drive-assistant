@@ -1,20 +1,18 @@
 import os
+import json
 import gradio as gr
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from sentence_transformers import SentenceTransformer
 import chromadb
 from huggingface_hub import InferenceClient
 import io
-import pickle
 
 # Google Drive scopes
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
-# Initialise models
+# Initialize models
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 chroma_client = chromadb.Client()
 collection = chroma_client.get_or_create_collection("my_drive_docs")
@@ -24,20 +22,15 @@ llm_client = InferenceClient(
 )
 
 def authenticate_google_drive():
-    """Authenticate with Google Drive"""
-    creds = None
-    if os.path.exists('token.json'):
-        with open('token.json', 'rb') as token:
-            creds = pickle.load(token)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'wb') as token:
-            pickle.dump(creds, token)
+    """Authenticate with Google Drive using Service Account"""
+    # Load credentials from environment variable
+    service_account_info = json.loads(
+        os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "{}")
+    )
+    creds = service_account.Credentials.from_service_account_info(
+        service_account_info,
+        scopes=SCOPES
+    )
     return build('drive', 'v3', credentials=creds)
 
 def fetch_drive_documents(service):
@@ -82,28 +75,34 @@ def chunk_text(text, chunk_size=500, overlap=50):
 
 def index_documents():
     """Fetch, chunk and index all Drive documents"""
-    service = authenticate_google_drive()
-    files = fetch_drive_documents(service)
-    
-    total_chunks = 0
-    for file in files:
-        content = download_file(service, file['id'], file['mimeType'])
-        if not content.strip():
-            continue
+    try:
+        service = authenticate_google_drive()
+        files = fetch_drive_documents(service)
         
-        chunks = chunk_text(content)
-        for i, chunk in enumerate(chunks):
-            chunk_id = f"{file['id']}_{i}"
-            embedding = embedding_model.encode(chunk).tolist()
-            collection.upsert(
-                ids=[chunk_id],
-                embeddings=[embedding],
-                documents=[chunk],
-                metadatas=[{"filename": file['name'], "chunk_order": i}]
-            )
-            total_chunks += 1
-    
-    return f"✅ Indexed {len(files)} documents — {total_chunks} chunks"
+        if not files:
+            return "⚠️ No documents found. Make sure you shared your Drive folder with the service account."
+        
+        total_chunks = 0
+        for file in files:
+            content = download_file(service, file['id'], file['mimeType'])
+            if not content.strip():
+                continue
+            
+            chunks = chunk_text(content)
+            for i, chunk in enumerate(chunks):
+                chunk_id = f"{file['id']}_{i}"
+                embedding = embedding_model.encode(chunk).tolist()
+                collection.upsert(
+                    ids=[chunk_id],
+                    embeddings=[embedding],
+                    documents=[chunk],
+                    metadatas=[{"filename": file['name'], "chunk_order": i}]
+                )
+                total_chunks += 1
+        
+        return f"✅ Indexed {len(files)} documents — {total_chunks} chunks ready!"
+    except Exception as e:
+        return f"❌ Error: {e}"
 
 def ask_question(question):
     """RAG — retrieve and answer"""
