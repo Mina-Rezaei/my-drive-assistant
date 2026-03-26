@@ -1,0 +1,6 @@
+credentials.json
+token.json
+_pycache_/
+*.pyc
+.env
+chroma_db/
